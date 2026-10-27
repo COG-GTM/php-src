@@ -559,54 +559,75 @@ void fcgi_shutdown(void)
 }
 
 #ifdef _WIN32
-/* Do some black magic with the NT security API.
- * We prepare a DACL (Discretionary Access Control List) so that
- * we, the creator, are allowed all access, while "Everyone Else"
- * is only allowed to read and write to the pipe.
- * This avoids security issues on shared hosts where a luser messes
- * with the lower-level pipe settings and screws up the FastCGI service.
+/* Build the DACL for the named pipe. The process user gets full access and
+ * LocalSystem gets read/write access. Everyone is only granted read/write
+ * access when explicitly requested via PHP_FCGI_SOCKET_MODE (any "other"
+ * permission bit set), because FastCGI has no authentication of its own.
  */
-static PACL prepare_named_pipe_acl(PSECURITY_DESCRIPTOR sd, LPSECURITY_ATTRIBUTES sa)
+static PACL prepare_named_pipe_acl(PSECURITY_DESCRIPTOR sd, LPSECURITY_ATTRIBUTES sa, int allow_everyone)
 {
-	DWORD req_acl_size;
-	char everyone_buf[32], owner_buf[32];
-	PSID sid_everyone, sid_owner;
+	DWORD req_acl_size, token_user_len = 0;
+	char everyone_buf[SECURITY_MAX_SID_SIZE], system_buf[SECURITY_MAX_SID_SIZE];
+	PSID sid_everyone, sid_system, sid_user;
 	SID_IDENTIFIER_AUTHORITY
 		siaWorld = SECURITY_WORLD_SID_AUTHORITY,
-		siaCreator = SECURITY_CREATOR_SID_AUTHORITY;
-	PACL acl;
+		siaNT = SECURITY_NT_AUTHORITY;
+	HANDLE token;
+	TOKEN_USER *token_user = NULL;
+	PACL acl = NULL;
 
 	sid_everyone = (PSID)&everyone_buf;
-	sid_owner = (PSID)&owner_buf;
+	sid_system = (PSID)&system_buf;
 
-	req_acl_size = sizeof(ACL) +
-		(2 * ((sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD)) + GetSidLengthRequired(1)));
-
-	acl = malloc(req_acl_size);
-
-	if (acl == NULL) {
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
 		return NULL;
 	}
+	if (!GetTokenInformation(token, TokenUser, NULL, 0, &token_user_len) && GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+		CloseHandle(token);
+		return NULL;
+	}
+	token_user = malloc(token_user_len);
+	if (token_user == NULL || !GetTokenInformation(token, TokenUser, token_user, token_user_len, &token_user_len)) {
+		CloseHandle(token);
+		goto out_fail;
+	}
+	CloseHandle(token);
+	sid_user = token_user->User.Sid;
 
 	if (!InitializeSid(sid_everyone, &siaWorld, 1)) {
 		goto out_fail;
 	}
 	*GetSidSubAuthority(sid_everyone, 0) = SECURITY_WORLD_RID;
 
-	if (!InitializeSid(sid_owner, &siaCreator, 1)) {
+	if (!InitializeSid(sid_system, &siaNT, 1)) {
 		goto out_fail;
 	}
-	*GetSidSubAuthority(sid_owner, 0) = SECURITY_CREATOR_OWNER_RID;
+	*GetSidSubAuthority(sid_system, 0) = SECURITY_LOCAL_SYSTEM_RID;
+
+	req_acl_size = sizeof(ACL) +
+		(sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD)) + GetLengthSid(sid_user) +
+		(sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD)) + GetLengthSid(sid_system) +
+		(sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD)) + GetLengthSid(sid_everyone);
+
+	acl = malloc(req_acl_size);
+
+	if (acl == NULL) {
+		goto out_fail;
+	}
 
 	if (!InitializeAcl(acl, req_acl_size, ACL_REVISION)) {
 		goto out_fail;
 	}
 
-	if (!AddAccessAllowedAce(acl, ACL_REVISION, FILE_GENERIC_READ | FILE_GENERIC_WRITE, sid_everyone)) {
+	if (!AddAccessAllowedAce(acl, ACL_REVISION, FILE_ALL_ACCESS, sid_user)) {
 		goto out_fail;
 	}
 
-	if (!AddAccessAllowedAce(acl, ACL_REVISION, FILE_ALL_ACCESS, sid_owner)) {
+	if (!AddAccessAllowedAce(acl, ACL_REVISION, FILE_GENERIC_READ | FILE_GENERIC_WRITE, sid_system)) {
+		goto out_fail;
+	}
+
+	if (allow_everyone && !AddAccessAllowedAce(acl, ACL_REVISION, FILE_GENERIC_READ | FILE_GENERIC_WRITE, sid_everyone)) {
 		goto out_fail;
 	}
 
@@ -620,13 +641,43 @@ static PACL prepare_named_pipe_acl(PSECURITY_DESCRIPTOR sd, LPSECURITY_ATTRIBUTE
 
 	sa->lpSecurityDescriptor = sd;
 
+	free(token_user);
 	return acl;
 
 out_fail:
+	free(token_user);
 	free(acl);
 	return NULL;
 }
 #endif
+
+/* Permissions of the listening Unix socket (or, on Windows, whether the named
+ * pipe is accessible to Everyone) can be widened via PHP_FCGI_SOCKET_MODE. */
+#define FCGI_DEFAULT_SOCKET_MODE 0660
+
+static int fcgi_get_socket_mode(void)
+{
+	const char *str = getenv("PHP_FCGI_SOCKET_MODE");
+	char *end;
+	long mode;
+
+	if (!str || !*str) {
+		return FCGI_DEFAULT_SOCKET_MODE;
+	}
+	if (*str < '0' || *str > '7') {
+		goto invalid;
+	}
+	errno = 0;
+	mode = strtol(str, &end, 8);
+	if (errno || *end || mode < 0 || mode > 0777) {
+		goto invalid;
+	}
+	return (int) mode;
+
+invalid:
+	fcgi_log(FCGI_ERROR, "PHP_FCGI_SOCKET_MODE must be an octal mode between 0000 and 0777\n");
+	return -1;
+}
 
 static int is_port_number(const char *bindpath)
 {
@@ -646,8 +697,12 @@ int fcgi_listen(const char *path, int backlog)
 	char      host[MAXPATHLEN];
 	short     port = 0;
 	int       listen_socket;
+	int       socket_mode = 0;
 	sa_t      sa;
 	socklen_t sock_len;
+#ifndef _WIN32
+	mode_t    saved_umask = 0;
+#endif
 #ifdef SO_REUSEADDR
 # ifdef _WIN32
 	BOOL reuse = 1;
@@ -668,6 +723,13 @@ int fcgi_listen(const char *path, int backlog)
 		if (port != 0) {
 			host[0] = '\0';
 			tcp = 1;
+		}
+	}
+
+	if (!tcp) {
+		socket_mode = fcgi_get_socket_mode();
+		if (socket_mode < 0) {
+			return -1;
 		}
 	}
 
@@ -709,7 +771,11 @@ int fcgi_listen(const char *path, int backlog)
 		memset(&sa, 0, sizeof(saw));
 		saw.nLength = sizeof(saw);
 		saw.bInheritHandle = FALSE;
-		acl = prepare_named_pipe_acl(&sd, &saw);
+		acl = prepare_named_pipe_acl(&sd, &saw, (socket_mode & 0006) != 0);
+		if (acl == NULL) {
+			fcgi_log(FCGI_ERROR, "Cannot prepare named pipe security descriptor - [%lu].\n", (unsigned long) GetLastError());
+			return -1;
+		}
 
 		namedPipe = CreateNamedPipe(path,
 			PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
@@ -745,6 +811,14 @@ int fcgi_listen(const char *path, int backlog)
 #endif
 	}
 
+#ifndef _WIN32
+	/* Create the Unix socket with the requested mode, so it is never
+	 * accessible to other users, not even before the chmod() below. */
+	if (!tcp) {
+		saved_umask = umask(0777 ^ socket_mode);
+	}
+#endif
+
 	/* Create, bind socket and start listen on it */
 	if ((listen_socket = socket(sa.sa.sa_family, SOCK_STREAM, 0)) < 0 ||
 #ifdef SO_REUSEADDR
@@ -752,13 +826,28 @@ int fcgi_listen(const char *path, int backlog)
 #endif
 	    bind(listen_socket, (struct sockaddr *) &sa, sock_len) < 0 ||
 	    listen(listen_socket, backlog) < 0) {
+		int err = errno;
+#ifndef _WIN32
+		if (!tcp) {
+			umask(saved_umask);
+		}
+#endif
 		close(listen_socket);
-		fcgi_log(FCGI_ERROR, "Cannot bind/listen socket - [%d] %s.\n",errno, strerror(errno));
+		fcgi_log(FCGI_ERROR, "Cannot bind/listen socket - [%d] %s.\n", err, strerror(err));
 		return -1;
 	}
 
 	if (!tcp) {
-		chmod(path, 0777);
+#ifndef _WIN32
+		umask(saved_umask);
+		if (chmod(path, socket_mode) < 0) {
+			int err = errno;
+			close(listen_socket);
+			unlink(path);
+			fcgi_log(FCGI_ERROR, "Cannot set permissions of socket '%s' - [%d] %s.\n", path, err, strerror(err));
+			return -1;
+		}
+#endif
 	} else {
 		char *ip = getenv("FCGI_WEB_SERVER_ADDRS");
 		char *cur, *end;

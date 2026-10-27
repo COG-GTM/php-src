@@ -122,6 +122,12 @@ have history support.
 .PD 1
 .B \-b \fIaddress:port\fP|\fIport\fP
 Bind Path for external FASTCGI Server mode (CGI only).
+A Unix socket path is created with mode 0660; set the
+.B PHP_FCGI_SOCKET_MODE
+environment variable (octal, e.g. 0600) to change it. On Windows, the named
+pipe is only accessible to the current user and LocalSystem unless
+.B PHP_FCGI_SOCKET_MODE
+grants "other" permissions (e.g. 0666).
 .TP
 .PD 0
 .B \-\-no\-chdir
