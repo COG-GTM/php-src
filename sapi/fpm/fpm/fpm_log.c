@@ -26,6 +26,42 @@ static struct zlog_stream fpm_log_stream;
 
 static int fpm_access_log_suppress(struct fpm_scoreboard_proc_s *proc);
 
+/* Write request-derived data with control bytes rendered as \xNN so it cannot forge or split log lines. */
+static ssize_t fpm_log_stream_escaped_str(struct zlog_stream *stream, const char *str, size_t len)
+{
+	static const char hex[] = "0123456789abcdef";
+	const char *start = str, *end = str + len, *p;
+	ssize_t written = 0;
+
+	for (p = str; p < end; p++) {
+		unsigned char c = (unsigned char) *p;
+		char esc[4];
+
+		if (c >= 0x20 && c != 0x7f) {
+			continue;
+		}
+		if (p > start) {
+			written += zlog_stream_str(stream, start, p - start);
+		}
+		esc[0] = '\\';
+		esc[1] = 'x';
+		esc[2] = hex[c >> 4];
+		esc[3] = hex[c & 0xf];
+		written += zlog_stream_str(stream, esc, sizeof(esc));
+		start = p + 1;
+	}
+	if (end > start) {
+		written += zlog_stream_str(stream, start, end - start);
+	}
+
+	return written;
+}
+
+static inline ssize_t fpm_log_stream_escaped_cstr(struct zlog_stream *stream, const char *cstr)
+{
+	return fpm_log_stream_escaped_str(stream, cstr, strlen(cstr));
+}
+
 int fpm_log_open(int reopen) /* {{{ */
 {
 	struct fpm_worker_pool_s *wp;
@@ -235,14 +271,14 @@ int fpm_log_write(char *log_format) /* {{{ */
 
 					if (!test) {
 						char *env = fcgi_getenv((fcgi_request*) SG(server_context), format, strlen(format));
-						zlog_stream_cstr(stream, env ? env : "-");
+						fpm_log_stream_escaped_cstr(stream, env ? env : "-");
 					}
 					format[0] = '\0';
 					break;
 
 				case 'f': /* script */
 					if (!test) {
-						zlog_stream_cstr(stream,  *proc.script_filename ? proc.script_filename : "-");
+						fpm_log_stream_escaped_cstr(stream, *proc.script_filename ? proc.script_filename : "-");
 					}
 					break;
 
@@ -254,7 +290,7 @@ int fpm_log_write(char *log_format) /* {{{ */
 
 				case 'm': /* method */
 					if (!test) {
-						zlog_stream_cstr(stream, *proc.request_method ? proc.request_method : "-");
+						fpm_log_stream_escaped_cstr(stream, *proc.request_method ? proc.request_method : "-");
 					}
 					break;
 
@@ -326,7 +362,7 @@ int fpm_log_write(char *log_format) /* {{{ */
 							}
 
 							header = h->header + format_len + 2;
-							written += zlog_stream_cstr(stream, header && *header ? header : "-");
+							written += fpm_log_stream_escaped_cstr(stream, header && *header ? header : "-");
 
 							/* found, done */
 							break;
@@ -352,7 +388,7 @@ int fpm_log_write(char *log_format) /* {{{ */
 
 				case 'q': /* query_string */
 					if (!test) {
-						zlog_stream_cstr(stream, proc.query_string);
+						fpm_log_stream_escaped_cstr(stream, proc.query_string);
 					}
 					break;
 
@@ -364,7 +400,7 @@ int fpm_log_write(char *log_format) /* {{{ */
 
 				case 'r': /* request URI */
 					if (!test) {
-						zlog_stream_cstr(stream, proc.request_uri);
+						fpm_log_stream_escaped_cstr(stream, proc.request_uri);
 					}
 					break;
 
@@ -402,7 +438,7 @@ int fpm_log_write(char *log_format) /* {{{ */
 
 				case 'u': /* remote user */
 					if (!test) {
-						zlog_stream_cstr(stream, proc.auth_user);
+						fpm_log_stream_escaped_cstr(stream, proc.auth_user);
 					}
 					break;
 

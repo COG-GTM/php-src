@@ -38,6 +38,8 @@ PHP                                                                        NEWS
   . Fixed bug GH-19320 (FPM UID and GID overflow). (Pratik Bhujel)
   . Fixed GHSA-62xp-839h-2637 (IPv6 ACL bypass in FastCGI listen.allowed_clients
     due to partial address comparison). (CVE-2026-91768) (Alexandre Daubois)
+  . Fixed access log injection: control characters in request-derived fields
+    (%u, %r, %q, %m, %f, %e, %o) are now written as \xNN escapes.
 
 - Intl:
   . Fixed grapheme_strpos() and grapheme_strrpos() with an empty needle
