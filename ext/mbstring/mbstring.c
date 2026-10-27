@@ -582,9 +582,18 @@ static char *php_mb_rfc1867_substring_conf(const zend_encoding *encoding, char *
 	return result;
 }
 
+static size_t php_mb_rfc1867_char_len(const char *pos, const char *end, const zend_encoding *encoding)
+{
+	size_t len = php_mb_mbchar_bytes(pos, (const mbfl_encoding *)encoding);
+	size_t remaining = end - pos;
+
+	return len <= remaining ? len : remaining;
+}
+
 static char *php_mb_rfc1867_getword(const zend_encoding *encoding, char **line, char stop) /* {{{ */
 {
 	char *pos = *line, quote;
+	const char *end = *line + strlen(*line);
 	char *res;
 
 	while (*pos && *pos != stop) {
@@ -601,8 +610,7 @@ static char *php_mb_rfc1867_getword(const zend_encoding *encoding, char **line, 
 				++pos;
 			}
 		} else {
-			pos += php_mb_mbchar_bytes(pos, (const mbfl_encoding *)encoding);
-
+			pos += php_mb_rfc1867_char_len(pos, end, encoding);
 		}
 	}
 	if (*pos == '\0') {
@@ -614,7 +622,7 @@ static char *php_mb_rfc1867_getword(const zend_encoding *encoding, char **line, 
 	res = estrndup(*line, pos - *line);
 
 	while (*pos == stop) {
-		pos += php_mb_mbchar_bytes(pos, (const mbfl_encoding *)encoding);
+		pos += php_mb_rfc1867_char_len(pos, end, encoding);
 	}
 
 	*line = pos;
