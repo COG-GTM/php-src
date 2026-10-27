@@ -687,14 +687,22 @@ PHPAPI void php_network_populate_name_from_sockaddr(
 			case AF_UNIX:
 				{
 					struct sockaddr_un *ua = (struct sockaddr_un*)sa;
+					size_t path_len = 0;
 
-					if (ua->sun_path[0] == '\0') {
+					/* Only trust the bytes the kernel reported in sl; an unnamed
+					 * peer has no sun_path at all and a pathname need not be
+					 * NUL-terminated when it fills sun_path. */
+					if (sl > XtOffsetOf(struct sockaddr_un, sun_path)) {
+						path_len = MIN((size_t)sl - XtOffsetOf(struct sockaddr_un, sun_path), sizeof(ua->sun_path));
+					}
+
+					if (path_len == 0) {
+						*textaddr = ZSTR_EMPTY_ALLOC();
+					} else if (ua->sun_path[0] == '\0') {
 						/* abstract name */
-						int len = sl - sizeof(sa_family_t);
-						*textaddr = zend_string_init((char*)ua->sun_path, len, 0);
+						*textaddr = zend_string_init((char*)ua->sun_path, path_len, 0);
 					} else {
-						int len = strlen(ua->sun_path);
-						*textaddr = zend_string_init((char*)ua->sun_path, len, 0);
+						*textaddr = zend_string_init((char*)ua->sun_path, zend_strnlen(ua->sun_path, path_len), 0);
 					}
 				}
 				break;
@@ -779,6 +787,7 @@ PHPAPI php_socket_t php_network_accept_incoming(php_socket_t srvsock,
 		error = php_socket_errno();
 	} else {
 		sl = sizeof(sa);
+		memset(&sa, 0, sizeof(sa));
 
 		clisock = accept(srvsock, (struct sockaddr*)&sa, &sl);
 
