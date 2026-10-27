@@ -300,6 +300,7 @@ static inline int sock_recvfrom(php_netstream_data_t *sock, char *buf, size_t bu
 	if (want_addr) {
 		php_sockaddr_storage sa;
 		socklen_t sl = sizeof(sa);
+		memset(&sa, 0, sizeof(sa));
 		ret = recvfrom(sock->socket, buf, XP_SOCK_BUF_SIZE(buflen), flags, (struct sockaddr*)&sa, &sl);
 		ret = (ret == SOCK_CONN_ERR) ? -1 : ret;
 #ifdef PHP_WIN32
