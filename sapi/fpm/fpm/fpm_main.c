@@ -1890,6 +1890,11 @@ int main(int argc, char *argv[])
 				} zend_end_try();
 				/* We want to serve more requests if this is fastcgi so cleanup and continue,
 				 * request shutdown is handled later. */
+			} else if (UNEXPECTED(fpm_php_limit_extensions(ZSTR_VAL(file_handle.filename)))) {
+				/* doc_root and user_dir make php_fopen_primary_script() open a file derived from
+				 * the request URI instead of path_translated, so check the file actually opened. */
+				SG(sapi_headers).http_response_code = 403;
+				PUTS("Access denied.\n");
 			} else {
 				fpm_request_executing();
 
