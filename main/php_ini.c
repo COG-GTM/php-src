@@ -798,6 +798,9 @@ PHPAPI void php_ini_activate_config(const HashTable *source_hash, int modify_typ
 
 	/* Walk through config hash and alter matching ini entries using the values found in the hash */
 	ZEND_HASH_MAP_FOREACH_STR_KEY_VAL(source_hash, str, data) {
+		if (Z_TYPE_P(data) != IS_STRING) {
+			continue;
+		}
 		zend_string *data_str = zend_string_dup(Z_STR_P(data), false);
 		zend_alter_ini_entry_ex(str, data_str, modify_type, stage, false);
 		zend_string_release(data_str);
@@ -844,7 +847,7 @@ PHPAPI void php_ini_activate_per_dir_config(char *path, size_t path_len)
 		while ((ptr = strchr(ptr, '/')) != NULL) {
 			*ptr = 0;
 			/* Search for source array matching the path from configuration_hash */
-			if ((tmp2 = zend_hash_str_find(&configuration_hash, path, strlen(path))) != NULL) {
+			if ((tmp2 = zend_hash_str_find(&configuration_hash, path, strlen(path))) != NULL && Z_TYPE_P(tmp2) == IS_ARRAY) {
 				php_ini_activate_config(Z_ARRVAL_P(tmp2), PHP_INI_SYSTEM, PHP_INI_STAGE_ACTIVATE);
 			}
 			*ptr = '/';
@@ -868,7 +871,7 @@ PHPAPI void php_ini_activate_per_host_config(const char *host, size_t host_len)
 
 	if (has_per_host_config && host && host_len) {
 		/* Search for source array matching the host from configuration_hash */
-		if ((tmp = zend_hash_str_find(&configuration_hash, host, host_len)) != NULL) {
+		if ((tmp = zend_hash_str_find(&configuration_hash, host, host_len)) != NULL && Z_TYPE_P(tmp) == IS_ARRAY) {
 			php_ini_activate_config(Z_ARRVAL_P(tmp), PHP_INI_SYSTEM, PHP_INI_STAGE_ACTIVATE);
 		}
 	}
