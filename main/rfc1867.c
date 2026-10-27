@@ -179,6 +179,31 @@ PHPAPI void destroy_uploaded_files_hash(void) /* {{{ */
 }
 /* }}} */
 
+static void rfc1867_discard_array(zval *arr)
+{
+	if (Z_TYPE_P(arr) == IS_ARRAY) {
+		SEPARATE_ARRAY(arr);
+		zend_hash_clean(Z_ARRVAL_P(arr));
+	}
+}
+
+/* Drop everything parsed from a request body that exceeded post_max_size */
+static void rfc1867_discard_parsed_data(zval *post_array)
+{
+	zval *el;
+
+	rfc1867_discard_array(post_array);
+	rfc1867_discard_array(&PG(http_globals)[TRACK_VARS_FILES]);
+
+	if (SG(rfc1867_uploaded_files)) {
+		ZEND_HASH_MAP_FOREACH_VAL(SG(rfc1867_uploaded_files), el) {
+			zend_string *filename = Z_STR_P(el);
+			VCWD_UNLINK(ZSTR_VAL(filename));
+		} ZEND_HASH_FOREACH_END();
+		zend_hash_clean(SG(rfc1867_uploaded_files));
+	}
+}
+
 /* {{{ Following code is based on apache_multipart_buffer.c from libapreq-0.33 package. */
 
 #define FILLUNIT (1024 * 5)
@@ -199,6 +224,9 @@ typedef struct {
 	const zend_encoding *input_encoding;
 	const zend_encoding **detect_order;
 	size_t detect_order_size;
+
+	zend_long post_max_size;
+	bool post_max_size_exceeded;
 } multipart_buffer;
 
 typedef struct {
@@ -221,6 +249,10 @@ static int fill_buffer(multipart_buffer *self)
 
 	self->buf_begin = self->buffer;
 
+	if (self->post_max_size_exceeded) {
+		return 0;
+	}
+
 	/* calculate the free space in the buffer */
 	bytes_to_read = self->bufsize - self->bytes_in_buffer;
 
@@ -237,6 +269,14 @@ static int fill_buffer(multipart_buffer *self)
 			SG(read_post_bytes) += actual_read;
 			total_read += actual_read;
 			bytes_to_read -= actual_read;
+
+			/* The Content-Length check may not apply (e.g. chunked requests
+			 * report a length of 0), so bound the bytes actually read. */
+			if (self->post_max_size > 0 && SG(read_post_bytes) > self->post_max_size) {
+				self->post_max_size_exceeded = true;
+				self->bytes_in_buffer = 0;
+				return 0;
+			}
 		} else {
 			break;
 		}
@@ -751,6 +791,7 @@ SAPI_API SAPI_POST_HANDLER_FUNC(rfc1867_post_handler)
 
 	/* Initialize the buffer */
 	mbuff = multipart_buffer_new(boundary, boundary_len);
+	mbuff->post_max_size = post_max_size;
 
 	/* Initialize $_FILES[] */
 	zend_hash_init(&PG(rfc1867_protected_variables), 8, NULL, NULL, 0);
@@ -1266,6 +1307,11 @@ SAPI_API SAPI_POST_HANDLER_FUNC(rfc1867_post_handler)
 	}
 
 fileupload_done:
+	if (mbuff->post_max_size_exceeded) {
+		EMIT_WARNING_OR_ERROR("Actual POST length does not match Content-Length, and exceeds " ZEND_LONG_FMT " bytes", post_max_size);
+		rfc1867_discard_parsed_data(array_ptr);
+	}
+
 	if (php_rfc1867_callback != NULL) {
 		multipart_event_end event_end;
 
