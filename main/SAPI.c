@@ -1139,18 +1139,21 @@ SAPI_API void sapi_add_request_header(const char *var, unsigned int var_len, cha
 	    var[3] == 'P' &&
 	    var[4] == '_') {
 
-		const char *p;
+		const char *p, *end;
 		char *str;
 
 		var_len -= 5;
 		p = var + 5;
+		end = p + var_len;
 		var = str = buf = do_alloca(var_len + 1, use_heap);
-		*str++ = *p++;
-		while (*p) {
+		if (*p) {
+			*str++ = *p++;
+		}
+		while (p < end && *p) {
 			if (*p == '_') {
 				*str++ = '-';
 				p++;
-				if (*p) {
+				if (p < end && *p) {
 					*str++ = *p++;
 				}
 			} else if (*p >= 'A' && *p <= 'Z') {
@@ -1160,6 +1163,8 @@ SAPI_API void sapi_add_request_header(const char *var, unsigned int var_len, cha
 			}
 		}
 		*str = 0;
+		/* The name may contain a NUL byte, only use what was written. */
+		var_len = str - buf;
 	} else if (var_len == sizeof("CONTENT_TYPE")-1 &&
 	           memcmp(var, "CONTENT_TYPE", sizeof("CONTENT_TYPE")-1) == 0) {
 		var = "Content-Type";
