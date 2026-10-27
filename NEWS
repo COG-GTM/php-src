@@ -1,5 +1,12 @@
 PHP                                                                        NEWS
 |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+?? ??? ????, PHP 8.5.12
+
+- CGI:
+  . Fixed php-cgi -b creating world-accessible FastCGI Unix sockets (0777)
+    and Everyone-accessible named pipes; the default is now 0660 and can be
+    changed with the PHP_FCGI_SOCKET_MODE environment variable.
+
 24 Sep 2026, PHP 8.5.11
 
 - BCMath:
